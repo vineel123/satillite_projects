@@ -73,17 +73,21 @@ def remove_haze(input_path, output_path):
 	if not output_path.exists():
 		output_path.mkdir()
 	input_images_list = glob.glob(str(input_path)+'/*.jpg')
+	output_images_list = [os.path.basename(x) for x in glob.glob(str(output_path)+'/*.jpg')]
 	executor = ThreadPoolExecutor(max_workers=4)
 	jobs = []
 	for image_path in input_images_list:
-		jobs.append(executor.submit(remove_haze_from_image , image_path , output_path))
+		if Path(image_path).name not in output_images_list:
+			jobs.append(executor.submit(remove_haze_from_image , image_path , output_path))
+		else:
+			print(f"alredy done {image_path}")
 	for job in futures.as_completed(jobs):
 		job.result()
 
 def transpose(x):
 	return x.transpose(1,2)
 
-def preprocess_data(path):
+def preprocess_data(path,folder = "train-jpg"):
 	#removing haze and storing in output_path
 	#output_path = input_path/"noHaze_train-jpg" 
 	#remove_haze(input_path/"train-jpg" , output_path)
@@ -95,7 +99,8 @@ def preprocess_data(path):
 	xtra_tfms = [ r_transpose ]
 	tfms = get_transforms(do_flip = True , flip_vert=True, max_lighting=0.1, max_zoom=1.05, max_warp=0. ,xtra_tfms=xtra_tfms)
 	np.random.seed(42)
-	src = (ImageList.from_csv(path, 'train_v2.csv', folder='train-jpg', suffix='.jpg')
+	print(folder)
+	src = (ImageList.from_csv(path, 'train_v2.csv', folder=folder, suffix='.jpg')
        .split_by_rand_pct(0.2)
        .label_from_df(label_delim=' '))
 	data = (src.transform(tfms, size=128)

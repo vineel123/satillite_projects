@@ -10,12 +10,59 @@ import matplotlib.pyplot as plt
 class regressor(nn.Module):
     def __init__(self,no_of_models):
         super(regressor,self).__init__()
-        self.regressor = nn.Linear(no_of_models , 1)
-        self.sigmoid = nn.Sigmoid()
+        self.regressor_ = nn.Linear(no_of_models , 1)
     def forward(self,x):
-        x = self.sigmoid(x)
-        x = self.regressor(x)
+        x = self.regressor_(x)
         return x
+
+class average_regressor(nn.Module):
+    def __init__(self, no_of_models):
+        super(average_regressor,self).__init__()
+    def forward(self,x):
+        return x.mean(1)
+
+class max_regressor(nn.Module):
+    def __init__(self, no_of_models):
+        super(max_regressor,self).__init__()
+    def forward(self,x):
+        return x.max(1)[0]
+
+class regressors(nn.Module):
+    def __init__(self, no_of_labels,no_of_models , regressor = average_regressor):
+        super(regressors , self).__init__()
+        self.regressors = [regressor(no_of_models) for _  in range(no_of_labels)]
+
+    def forward(self,x):
+        output = []
+        for regressor,batch in zip(self.regressors, x):
+            output.append(regressor(batch).view(len(x[0])))
+        output = torch.stack(output,1)
+        return output
+
+class ensemble_model(nn.Module):
+    def __init__(self,models,regressors,no_of_labels=17):
+        super(ensemble_model,self).__init__()
+        self.models = models
+        self.regressors = regressors
+        self.no_of_labels = no_of_labels
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        batches_x=[[[] for j in range(len(x))] for i in range(self.no_of_labels)]
+        for model in self.models:
+            y_pred = model(x)
+            y_pred = self.sigmoid(y_pred)
+            for i in range(len(x)):
+                for logit in range(self.no_of_labels):
+                    batches_x[logit][i].append(y_pred[i][logit])
+
+        for i in range(self.no_of_labels):
+            for j in range(len(x)):
+                batches_x[i][j] = torch.stack(batches_x[i][j])
+            batches_x[i]=torch.stack(batches_x[i])
+        batches_x=torch.stack(batches_x)
+        output = self.regressors(batches_x)
+        return output
 
 
 class LossFunction():
@@ -29,6 +76,7 @@ class LossFunction():
     def torch_fbeta_score(self,y_true, y_pred, beta, eps=1e-9):
         beta2 = beta**2
         y_true = y_true.float()
+        #print(y_pred)
         true_positive = (y_pred * y_true).sum(dim=1)
         precision = true_positive.div(y_pred.sum(dim=1).add(eps))
         recall = true_positive.div(y_true.sum(dim=1).add(eps))
@@ -39,35 +87,6 @@ class LossFunction():
 
     def __call__(self,x,y):
         return self.f2Loss(x,y)+self.logloss(x,y)
-
-
-
-class ensemble_model(nn.Module):
-    def __init__(self,models,regressors,no_of_labels=17):
-        self.models = models
-        self.regressors = regressors
-        self.no_of_labels = no_of_labels
-
-    def forward(self, x):
-        temp = [[[] for _ in range(len(y))] for _   in range(self.no_of_labels)]
-        for model in self.models:
-            y_pred = model(x)
-            for i,batch_pred  in enumerate(y_pred):
-                for logit in range(self.no_of_labels):
-                    temp[logit][i].append(batch_pred[logit])
-
-        regressors_batch=list()
-        for logit in range(self.no_of_labels):
-            regressors_batch.append(torch.stack([torch.stack(i) for i in temp[logit]]))
-
-        output =[]
-        for batch,regressor in zip(regressors_batch,self.regressors):
-            output.append(regressor(batch))
-        return torch.stack(output)
-
-
-
-
 
 class ensemble_model_trainer():
     def __init__(self , archs = None , no_of_labels = 17 , thresh = 0.2):
@@ -160,43 +179,54 @@ class ensemble_model_trainer():
 
 
     
-    def collate(self,batch):
+    def collate(self,batch,no_of_labels = 17):
         batch = to_data(batch)
-        transposed = zip(*batch)
-        x = torch.stack([torch.tensor(i) for i in next(transposed)])
-        y = torch.tensor([torch.tensor(i) for i in next(transposed)])
-        return x,y
+        batches_x=[[[] for j in range(len(batch))] for i in range(no_of_labels)]
+        batches_y=[]
+        for j,data in enumerate(batch):
+            x,y = data
+            for i,x1 in enumerate(x):
+                batches_x[i][j]=torch.tensor(x1)
+            batches_y.append(torch.tensor(y))
+        batches_x = torch.stack([torch.stack(batches_x[i]) for i in range(no_of_labels)])
+        batches_y = torch.stack(batches_y)
+        return batches_x,batches_y
 
-    def create_regressors(self):
-        logits_dict = [{} for _ in range(self.no_of_labels)]
-        for dit in logits_dict:
-            dit["labels"] = list()
-            dit["values"] = list()
+    def create_regressors(self , regressor = average_regressor , use_sigmoid = False):
+        logits_dict = {}
+        sigmoid = nn.Sigmoid()
+        for i in range(self.no_of_labels):
+            logits_dict[f"values_{i}"] = list()
+            logits_dict[f"labels_{i}"] = list()
+
         with torch.no_grad():
             for data in self.learners[0].data.train_dl:
                 x , y = data
                 for batch_y in y:
-                    for logit in range(self.no_of_labels):
-                        logits_dict[logit]["labels"].append(batch_y[logit].item())            
+                    for logits in range(self.no_of_labels):
+                        logits_dict[f"labels_{logits}"].append(batch_y[logits].item())            
 
                 temp = [[[] for _ in range(len(y))] for _   in range(self.no_of_labels) ]
 
                 for learner in self.learners:
                     y_pred = learner.model(x)
+                    if use_sigmoid:
+                        y_pred = sigmoid(y_pred)
                     for i,batch_pred  in enumerate(y_pred):
                         for logit in range(self.no_of_labels):
                             temp[logit][i].append(batch_pred[logit].item())
                 for logit in range(self.no_of_labels):
-                    logits_dict[logit]["values"]+=temp[logit]
-                
-        dataBunches = [ItemList.from_df(pd.DataFrame(logits_dict[logit]) , cols = 1).split_by_rand_pct().label_from_df(cols="labels").databunch(collate_fn = self.collate  ) for logit in range(self.no_of_labels)]
-        for i,databunch in enumerate(dataBunches):
-            databunch.save(f"regressor{i}")
-        
+                    logits_dict[f"values_{logit}"]+=temp[logit]
+                break
 
-        acc_02 = partial(accuracy_thresh, thresh=self.thresh_)
+        data = pd.DataFrame(logits_dict)
+        databunch = ItemList.from_df(data , cols = [f"values_{i}" for i in range(17)]).split_by_rand_pct().label_from_df(cols=[f"labels_{i}" for i in range(17)]).databunch(collate_fn = self.collate,device=torch.device('cpu') , bs = 2)
+        f_score = partial(fbeta, thresh=self.thresh_,beta=2 ,  sigmoid = False)
+        acc_02 = partial(accuracy_thresh, thresh=self.thresh_ ,  sigmoid = False)
         model_dir = "./models"
-        self.regressors = [Learner(data = dataBunches[i] , model = regressor(self.no_of_models) , metrics=[acc_02],model_dir = model_dir) for i in range(self.no_of_labels)]
+        regressors_model = regressors(self.no_of_labels ,  self.no_of_models , regressor)
+        #regressors_model = regressors_model.to("cuda:0")
+        self.regressors = Learner(data = databunch , model = regressors_model  , metrics=[acc_02,f_score],model_dir = model_dir , loss_func = self.lossFunction)
 
 
     def save_regressors(self):
@@ -209,7 +239,7 @@ class ensemble_model_trainer():
 
     def create_model(self):
         models = [learner.model for learner in self.learners ]
-        regressors = [regressor.model for regressor in self.regressors]
+        regressors = self.regressors.model
         return ensemble_model(models,regressors,self.no_of_labels)
 
 if __name__=="__main__":
